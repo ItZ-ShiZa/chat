@@ -25,7 +25,7 @@ if [ ! -f "client/client.cpp" ]; then
 fi
 
 echo -e "${GREEN}Сборка клиента...${NC}"
-g++ client/client.cpp -o client/client
+g++ -std=c++20 client/client.cpp -o client/client
 if [ $? -ne 0 ]; then
     echo -e "${RED}Ошибка сборки клиента${NC}"
     exit 1
