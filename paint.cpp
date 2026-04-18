@@ -4,8 +4,8 @@
 #include <vector>
 
 std::string name = "M1";
-std::string pathToUserChatsList = std::filesystem::current_path().string() + "/paint/chats/" + name;
-std::string pathToUserChatsHistory = std::filesystem::current_path().string() + "/paint/chats/" + name + "/chatsHistory/";
+std::string pathToUserChatsList = std::filesystem::current_path().string() + "/chats/" + name;
+std::string pathToUserChatsHistory = std::filesystem::current_path().string() + "/chats/" + name + "/chatsHistory/";
 std::vector<std::string> chatsList;
 
 void getChatsList () {
