@@ -19,13 +19,27 @@ int stringLength (std::string message) {
 }
 
 int substrUTF8 (std::string message, int n) {
-    int length, realLength;
-    for (int i = 0; i < n; i++) {
-        if ((message[i] & 0xC0) != 0x80) {
-            length++;
+    int bytes = 0;
+    
+    for (int chars = 0; chars < n && bytes < message.length(); chars++) {
+        unsigned char c = message[bytes];
+        if (c < 0x80) {
+            bytes += 1;
         }
-        realLength++;
+        else if ((c & 0xE0) == 0xC0) {
+            bytes += 2;
+        }
+        else if ((c & 0xF0) == 0xE0) {
+            bytes += 3;
+        }
+        else if ((c & 0xF8) == 0xF0) {
+            bytes += 4;
+        }
+        else {
+            return -1;
+        }
     }
+    return bytes;
 }
 
 void getChatsList () {
@@ -40,16 +54,26 @@ void getChatsList () {
     file.close();
 }
 
-void getChatHistory (std::string chatName) {
-    std::string filePath = pathToUserChatsHistory + chatName + ".txt";
-    
+std::string getLineFromFile (std::string fileName) {
+    std::string filePath = pathToUserChatsHistory + fileName + ".txt";
+    std::ifstream file(filePath);
+    std::string chatLine;
+    std::getline(file, chatLine);
+    file.close();
+    return chatLine;
 }
 
+void getChatHistory (std::string chatName) {
+    for (int i; i < 21; i++) {
+        std::string line = getLineFromFile(chatName); 
+    }
+
+}
 
 void writeFile (std::string fileName, std::string message) {
     std::string filePath;
     if (fileName != "chatsList.txt") {
-        filePath = pathToUserChatsList + fileName;
+        filePath = pathToUserChatsHistory + fileName;
     } else {
         filePath = pathToUserChatsList + "/chatsList.txt";
     }
@@ -58,16 +82,25 @@ void writeFile (std::string fileName, std::string message) {
 }
 
 void updateFile (std::string fileName, std::string message) {
+    int n, pos = -1, check = 96;
     std::string tempMessage;
-    int n = 0, pos = -1, start = 0;
 
     while (message.size() > 0) {
-        tempMessage = message.substr(0, 96);
+        size_t start = message.find_first_not_of(" \t\n\r\f\v");
+        if (start != std::string::npos) {
+            message = message.substr(start);
+        }
+        n = substrUTF8(message, check);
+        tempMessage = message.substr(0, n);
         pos = tempMessage.find_last_of(' ');
         if (pos != -1) {
-            writeFile(fileName, tempMessage);
-        } else {
             tempMessage = tempMessage.substr(0, pos);
+            writeFile(fileName, tempMessage);
+            message = message.substr(pos);
+        } else {
+            writeFile(fileName, tempMessage);
+            n = substrUTF8(tempMessage, check);
+            message = message.substr(n);
         }
     }
 
@@ -97,8 +130,6 @@ void updateFile (std::string fileName, std::string message) {
     //     }
     // }
 }
-
-
 
 void goToXY (int x, int y) {
     std::cout << "\u001b[" << y << ";" << x << "H" << std::flush;
@@ -153,7 +184,7 @@ int main() {
     printChat();
     printChatList();
 
-    updateFile("chatsList.txt", "M2");
+    updateFile("M2.txt", "bкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbкbк");
 
     std::cout << std::endl;
 }
