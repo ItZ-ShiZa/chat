@@ -1,153 +1,338 @@
 #include <iostream>
-#include <cstring>
-#include <unistd.h>
-#include <arpa/inet.h>
 #include <string>
 #include <thread>
 #include <atomic>
-#include <csignal>
-#include <fstream>
 #include <mutex>
-#include <termios.h>
-#include <algorithm>
+#include <fstream>
 #include <vector>
-#include <sstream>
+#include <algorithm>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <termios.h>
+#include <sys/select.h>
+#include <errno.h>
 
 #define bufferSize 1024
-std::mutex clientMutex;
-std::atomic<bool> running{true};
-std::string msg;
-std::vector<std::string> wrongConnect = {"Сеанс уже существует", "Неверный пароль", "Нет пользователя", "Пользователь существует"};
 
-void popChar(std::string& str) {
-    if (str.empty()) return;
-    while (!str.empty() && (str.back() & 0xC0) == 0x80) {
-        str.pop_back();
-    }
-    if (!str.empty()) {
-        str.pop_back();
-    }
-}
+class TcpSocket {
+public:
+    TcpSocket() = default;
 
-void receiveMessages(int sockfd) {
-    char buffer[bufferSize];
-    while (running) {
-        int n = recvfrom(sockfd, buffer, bufferSize - 1, 0, nullptr, nullptr);
-        if (n > 0) {
-            {
-                std::lock_guard<std::mutex> lock(clientMutex);
-                buffer[n] = '\0';
-                std::cout << "\r\033[K" << buffer << std::endl;
-                std::cout << "> " << msg << std::flush;
+    ~TcpSocket() {
+        closeSocket();
+    }
+
+    bool connectTo(const std::string& ip, uint16_t port) {
+        fd = socket(AF_INET, SOCK_STREAM, 0);
+
+        if (fd < 0) {
+            return false;
+        }
+
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(port);
+
+        inet_pton(AF_INET, ip.c_str(), &addr.sin_addr);
+
+        return connect(fd, (sockaddr*)&addr, sizeof(addr)) >= 0;
+    }
+
+    bool sendLine(const std::string& line) {
+        std::string data = line + "\n";
+
+        const char* ptr = data.c_str();
+        size_t left = data.size();
+
+        while (left > 0) {
+            ssize_t n = send(fd, ptr, left, 0);
+
+            if (n < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+
+                return false;
             }
-        } else if (n < 0 && errno != EINTR) {
-            if (running) {
-                std::cerr << "\nОшибка приема данных" << std::endl;
+
+            ptr += n;
+            left -= static_cast<size_t>(n);
+        }
+
+        return true;
+    }
+
+    bool readLine(std::string& line) {
+        while (true) {
+            size_t pos = buffer.find('\n');
+
+            if (pos != std::string::npos) {
+                line = buffer.substr(0, pos);
+
+                buffer.erase(0, pos + 1);
+
+                if (!line.empty() && line.back() == '\r') {
+                    line.pop_back();
+                }
+
+                return true;
             }
-            break;
+
+            char temp[bufferSize];
+
+            ssize_t n = recv(fd, temp, sizeof(temp), 0);
+
+            if (n == 0) {
+                return false;
+            }
+
+            if (n < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+
+                return false;
+            }
+
+            buffer.append(temp, static_cast<size_t>(n));
         }
     }
-}
 
-void sendMessages(int sockfd, sockaddr_in& serverAddr, std::string name) {
-    termios oldTerminal, newTerminal;
-    tcgetattr(STDIN_FILENO, &oldTerminal);
-    newTerminal = oldTerminal;
-    newTerminal.c_lflag &= ~(ECHO | ICANON);
-    tcsetattr(STDIN_FILENO, TCSANOW, &newTerminal);
+    void shutdownSocket() {
+        if (fd >= 0) {
+            shutdown(fd, SHUT_RDWR);
+        }
+    }
 
-    char c;
-    std::cout << "> " << std::flush;
+    void closeSocket() {
+        if (fd >= 0) {
+            close(fd);
+            fd = -1;
+        }
+    }
 
-    while (running) {
-        if (read(STDIN_FILENO, &c, 1) > 0) {
-            std::lock_guard<std::mutex> lock(clientMutex);
+private:
+    int fd{-1};
+    std::string buffer;
+};
+
+class TerminalMode {
+public:
+    TerminalMode() {
+        tcgetattr(STDIN_FILENO, &oldTerm);
+
+        newTerm = oldTerm;
+        newTerm.c_lflag &= ~(ICANON | ECHO);
+
+        tcsetattr(STDIN_FILENO, TCSANOW, &newTerm);
+    }
+
+    ~TerminalMode() {
+        tcsetattr(STDIN_FILENO, TCSANOW, &oldTerm);
+    }
+
+private:
+    termios oldTerm{};
+    termios newTerm{};
+};
+
+class ChatClient {
+public:
+    bool run(const std::string& mode, const std::string& login, const std::string& password) {
+        if (!loadServerSettings()) {
+            return false;
+        }
+
+        if (!socket.connectTo(serverIp, serverPort)) {
+            std::cerr << "Ошибка подключения" << std::endl;
+            return false;
+        }
+
+        if (!authenticate(mode, login, password)) {
+            return false;
+        }
+
+        std::cout << "Чат запущен. Введите /exit для выхода." << std::endl;
+
+        std::thread receiver(&ChatClient::receiveLoop, this);
+        std::thread sender(&ChatClient::sendLoop, this);
+
+        sender.join();
+
+        running = false;
+
+        socket.shutdownSocket();
+
+        if (receiver.joinable()) {
+            receiver.join();
+        }
+
+        return true;
+    }
+
+private:
+    TcpSocket socket;
+
+    std::atomic<bool> running{true};
+
+    std::mutex ioMutex;
+
+    std::string currentMessage;
+
+    std::string serverIp;
+    uint16_t serverPort{0};
+
+    std::vector<std::string> authErrors {
+        "Сеанс уже существует",
+        "Неверный пароль",
+        "Нет пользователя",
+        "Пользователь существует"
+    };
+
+    bool loadServerSettings() {
+        std::ifstream file("settingsServer.txt");
+
+        if (!file.is_open()) {
+            return false;
+        }
+
+        std::string port;
+
+        std::getline(file, serverIp);
+        std::getline(file, port);
+
+        serverPort = static_cast<uint16_t>(atoi(port.c_str()));
+
+        return true;
+    }
+
+    bool authenticate(const std::string& mode, const std::string& login, const std::string& password) {
+        std::string authMessage = mode + " " + login + " " + password;
+
+        if (!socket.sendLine(authMessage)) {
+            return false;
+        }
+
+        std::string response;
+
+        if (!socket.readLine(response)) {
+            return false;
+        }
+
+        std::cout << response << std::endl;
+
+        return std::find(authErrors.begin(), authErrors.end(), response) == authErrors.end();
+    }
+
+    void receiveLoop() {
+        std::string line;
+
+        while (running) {
+            if (!socket.readLine(line)) {
+                running = false;
+                break;
+            }
+
+            std::lock_guard<std::mutex> lock(ioMutex);
+
+            std::cout << "\r\033[K" << line << std::endl;
+
+            std::cout << "> " << currentMessage << std::flush;
+        }
+    }
+
+    void sendLoop() {
+        TerminalMode term;
+
+        std::cout << "> " << std::flush;
+
+        while (running) {
+            fd_set set;
+
+            FD_ZERO(&set);
+            FD_SET(STDIN_FILENO, &set);
+
+            timeval tv{};
+            tv.tv_sec = 0;
+            tv.tv_usec = 200000;
+
+            int rv = select(STDIN_FILENO + 1, &set, nullptr, nullptr, &tv);
+
+            if (rv <= 0) {
+                continue;
+            }
+
+            char c;
+
+            if (read(STDIN_FILENO, &c, 1) <= 0) {
+                continue;
+            }
+
+            std::lock_guard<std::mutex> lock(ioMutex);
 
             if (c == '\n') {
-                if (msg != "") {
-                    std::string fullMessage;
-                    std::istringstream iss(msg);
-                    std::string firstKey;
-                    iss >> firstKey;
-                    if (firstKey == "/exit") {
-                        sendto(sockfd, (name + " /exit").c_str(), (name + " /exit").size(), 0, (sockaddr*)&serverAddr, sizeof(serverAddr));
-                        running = false;
-                        break;
-                    }
-                    sendto(sockfd, (name + " " + msg).c_str(), (name + " " + msg).size(), 0, (sockaddr*)&serverAddr, sizeof(serverAddr));
-                    msg.clear();
-                    std::cout << std::endl;
-                    std::cout << "> " << std::flush;
-                } else {
-                    msg.clear();
-                    std::cout << "Сообщение не отправлено. Пустое." << std::endl;
-                    std::cout << "> " << std::flush;
-                }
-            } else if (c == 127) {
-                if (!msg.empty()) {
-                    // msg.pop_back();
-                    popChar(msg);
-                    std::cout << "\b \b" << std::flush;
-                }
-            } else {
-                msg += c;
-                std::cout << c << std::flush;
+                processInput();
+            }
+            else if (c == 127 || c == 8) {
+                processBackspace();
+            }
+            else {
+                currentMessage += c; std::cout << c << std::flush;
             }
         }
     }
 
-    tcsetattr(STDIN_FILENO, TCSANOW, &oldTerminal);
-    close(sockfd);
-}
+    void processInput() {
+        if (currentMessage.empty()) {
+            std::cout << std::endl << "Сообщение не отправлено. Пустое." << std::endl << "> " << std::flush;
+
+            return;
+        }
+
+        if (currentMessage == "/exit") {
+            socket.sendLine("/exit");
+
+            currentMessage.clear();
+
+            running = false;
+
+            socket.shutdownSocket();
+
+            return;
+        }
+
+        socket.sendLine(currentMessage);
+
+        currentMessage.clear();
+
+        std::cout << std::endl << "> " << std::flush;
+    }
+
+    void processBackspace() {
+        if (currentMessage.empty()) {
+            return;
+        }
+
+        while (!currentMessage.empty() && (currentMessage.back() & 0xC0) == 0x80) {
+            currentMessage.pop_back();
+        }
+
+        currentMessage.pop_back();
+
+        std::cout << "\b \b" << std::flush;
+    }
+};
 
 int main(int argc, char* argv[]) {
     if (argc != 4) {
-        std::cerr << "Использование: " << argv[0] << "<login/singin><name><password>" << std::endl;
+        std::cerr << "Использование: " << argv[0] << " <login/singin> <name> <password>" << std::endl;
+
         return 1;
     }
-    int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
 
-    std::ifstream file("settingsServer.txt");
-    std::string ip, port;
-    std::getline(file, ip);
-    std::getline(file, port);
+    ChatClient client;
 
-    sockaddr_in serverAddr{};
-    serverAddr.sin_family = AF_INET;
-    serverAddr.sin_port = htons(atoi(port.c_str()));
-    inet_pton(AF_INET, ip.c_str(), &serverAddr.sin_addr);
+    client.run(argv[1], argv[2], argv[3]);
 
-    std::string msgAuth = std::string(argv[1]) + " " + std::string(argv[2]) + " " + std::string(argv[3]); 
-    sendto(sockfd, msgAuth.c_str(), msgAuth.size(), 0, (sockaddr*)&serverAddr, sizeof(serverAddr));
-    while (true) {
-        char buffer[bufferSize];
-        int n = recvfrom(sockfd, buffer, bufferSize - 1, 0, nullptr, nullptr);
-        if (n > 0) {
-            {
-                std::lock_guard<std::mutex> lock(clientMutex);
-                buffer[n] = '\0';
-                std::cout << "\r\033[K" << buffer << std::endl;
-            }
-            if (std::ranges::find(wrongConnect, buffer) != wrongConnect.end()) {
-                close(sockfd);
-                return 0;
-            }
-            break;
-        }
-    } 
-
-    std::cout << "Чат запущен. Введите /exit для выхода." << std::endl;
-
-    std::thread receiver(receiveMessages, sockfd);
-    std::thread sender(sendMessages, sockfd, std::ref(serverAddr), std::string(argv[2]));
-    
-    sender.join();
-    
-    if (receiver.joinable()) {
-        pthread_cancel(receiver.native_handle());
-        receiver.join();
-    }
-    
-    close(sockfd);
     return 0;
 }
