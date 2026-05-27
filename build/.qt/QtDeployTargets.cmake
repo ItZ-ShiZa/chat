@@ -1,0 +1,2 @@
+set(__QT_DEPLOY_TARGET_MyQtConsoleApp_FILE /home/Sora/chat/build/MyQtConsoleApp)
+set(__QT_DEPLOY_TARGET_MyQtConsoleApp_TYPE EXECUTABLE)
