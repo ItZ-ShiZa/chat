@@ -188,3 +188,11 @@ int main() {
 
     std::cout << std::endl;
 }
+
+/*
+    Исполняемые функции:
+        printChat
+        printChatList
+        updateFile
+        getChatHistory
+*/
